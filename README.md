@@ -178,3 +178,16 @@ dotnet build src/Switchyard
 ./publish.sh pack       # artifacts/nupkg: dotnet tool install -g Switchyard --add-source artifacts/nupkg
 ./publish.sh binaries   # framework-dependent builds per platform in artifacts/{rid}/
 ```
+
+## Releasing
+
+CI builds and smoke-tests every push on Linux, macOS and Windows. A version tag also packs that
+version and publishes it to nuget.org:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Publishing needs a nuget.org API key (scope: push, package `Switchyard`) in the repository secret
+`NUGET_API_KEY`.
+

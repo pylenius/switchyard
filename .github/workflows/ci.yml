@@ -1,0 +1,77 @@
+name: CI
+
+# Every push and pull request: build and smoke-test on Linux, macOS and Windows.
+# A tag v1.2.3: also pack version 1.2.3 and publish it to nuget.org (needs the NUGET_API_KEY secret).
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build
+        run: dotnet build src/Switchyard -c Release --nologo -warnaserror
+
+      # Start it on the example config (routing only: the example's projects do not exist), check the
+      # API and a command answer, then stop it.
+      - name: Smoke test
+        run: |
+          dll=src/Switchyard/bin/Release/net10.0/switchyard.dll
+          dotnet "$dll" --config examples/switchyard.json --headless --no-processes \
+            --StateFile="$RUNNER_TEMP/switchyard/state.json" > "$RUNNER_TEMP/switchyard.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8088/_gw/state > "$RUNNER_TEMP/state.json" && break
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/switchyard.log"
+          grep -q '"name": "shop"' "$RUNNER_TEMP/state.json"
+          grep -q '"route": "/api/orders"' "$RUNNER_TEMP/state.json"
+          dotnet "$dll" status --config examples/switchyard.json
+          kill "$pid" || true
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Pack
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dotnet pack src/Switchyard -c Release -p:Version="$version" -o artifacts/nupkg --nologo
+
+      - name: Publish to nuget.org
+        run: dotnet nuget push "artifacts/nupkg/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/nupkg/*.nupkg
