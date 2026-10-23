@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Switchyard</RootNamespace>
+    <AssemblyName>switchyard</AssemblyName>
+
+    <!-- dotnet tool install -g Switchyard -->
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>switchyard</ToolCommandName>
+    <PackageId>Switchyard</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Pekka Ylenius</Authors>
+    <Description>Run the services you work on locally and route the rest to dev, staging or prod: one local gateway that also builds, runs and restarts .NET, Vite and Docker processes, from any git worktree.</Description>
+    <PackageTags>gateway;reverse-proxy;yarp;microservices;local-development;dotnet-tool</PackageTags>
+    <PackageProjectUrl>https://github.com/pylenius/switchyard</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/pylenius/switchyard</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+  </ItemGroup>
+
+</Project>

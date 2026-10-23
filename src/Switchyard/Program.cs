@@ -1,0 +1,259 @@
+using System.Runtime.InteropServices;
+using Switchyard;
+using Microsoft.Extensions.Options;
+using Yarp.ReverseProxy.Configuration;
+
+// Local entry point for a set of HTTP services: each path prefix goes to the service running on this
+// machine, or to the selected backup environment when it is toggled off. It also runs them: a service
+// toggled local is built and started from its checkout, one toggled off is stopped.
+//
+//   run                          text UI; attaches to a running gateway, or starts one in-process
+//   run --headless               gateway only; control it through /_gw or the commands below
+//   run --no-processes           route only, start nothing (when something else runs the services)
+//   run --config <file|folder>   the switchyard.json to use (default: found from the current folder up)
+//   run --env Beta               ASP.NET environment for the dotnet services (default: RunAs, or $SWITCHYARD_ENV)
+//   run --workspace <worktree>   default checkout for the services (saved for next time)
+//   run status | start | stop | restart | build | errors | logs | setup | workspace ...   see Cli.cs
+//   any setting from the config file can be given too, e.g. --Port=9000
+var options = Flags.Parse(args);
+
+if (GatewayOptions.FindConfig(options.Config) is not { } configPath || !File.Exists(configPath))
+{
+    Console.Error.WriteLine(options.Config != null
+        ? $"No config at {options.Config}."
+        : $"No {GatewayOptions.ConfigFile} in {Directory.GetCurrentDirectory()} or above it; pass --config <file>. See README.md.");
+    Environment.ExitCode = 2;
+    return;
+}
+
+// The project's file, then the developer's own (not committed), then the command line. Kept apart from
+// the host's configuration, which also reads environment variables (PORT would become Port).
+var configDirectory = Path.GetDirectoryName(configPath)!;
+var gatewayConfig = new ConfigurationBuilder()
+    .AddJsonFile(configPath, optional: false)
+    .AddJsonFile(Path.Combine(configDirectory, GatewayOptions.UserConfigFile), optional: true)
+    .AddCommandLine(options.Rest)
+    .Build();
+var gateway = (gatewayConfig.Get<GatewayOptions>() ?? new GatewayOptions()).Resolve(configDirectory);
+var adminUrl = $"http://localhost:{gateway.Port}/_gw/";
+var runAs = options.AspNetEnvironment ?? gateway.RunAs;
+
+if (options.Command != null)
+{
+    Environment.ExitCode = await Cli.Run(options.Command, options.CommandArgs, new GatewayClient(adminUrl));
+    return;
+}
+
+if (!options.Headless && await GatewayClient.IsRunning(adminUrl))
+{
+    await Tui.Run(new GatewayClient(adminUrl), ownsGateway: false, CancellationToken.None);
+    return;
+}
+
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = options.Rest,
+    // The binary's own appsettings.json (logging) is found wherever it is started from.
+    ContentRootPath = AppContext.BaseDirectory,
+});
+builder.Services.AddSingleton(Options.Create(gateway));
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(60));
+builder.Services.AddSingleton(new SupervisorSettings(options.Processes, runAs));
+builder.Services.AddSingleton<GatewayState>();
+builder.Services.AddSingleton<Workspaces>();
+builder.Services.AddSingleton<ProcessSupervisor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ProcessSupervisor>());
+builder.Services.AddSingleton<StatusBuilder>();
+builder.Services.AddHostedService<LocalHealthProbe>();
+builder.Services.AddReverseProxy().LoadFromMemory([], []);
+builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.WriteIndented = true);
+
+builder.WebHost.ConfigureKestrel(kestrel =>
+{
+    kestrel.ListenLocalhost(gateway.Port);
+    foreach (var port in gateway.Services.Select(s => s.Port).OfType<int>().Distinct())
+        kestrel.ListenLocalhost(port);
+});
+
+// The text UI owns the terminal; console logging would scribble over it.
+if (!options.Headless)
+    builder.Logging.ClearProviders();
+
+var app = builder.Build();
+
+var state = app.Services.GetRequiredService<GatewayState>();
+var workspaces = app.Services.GetRequiredService<Workspaces>();
+var supervisor = app.Services.GetRequiredService<ProcessSupervisor>();
+if (options.Workspace != null)
+{
+    if (workspaces.Find(options.Workspace) == null)
+    {
+        Console.Error.WriteLine($"No checkout '{options.Workspace}'. There are: {string.Join(", ", workspaces.List().Select(w => w.Name))}");
+        Environment.ExitCode = 1;
+        return;
+    }
+    state.SetWorkspace(null, options.Workspace);
+}
+
+var proxyConfig = app.Services.GetRequiredService<InMemoryConfigProvider>();
+void ApplyRoutes()
+{
+    var (routes, clusters) = ProxyRoutes.Build(state, gateway.Port);
+    proxyConfig.Update(routes, clusters);
+}
+ApplyRoutes();
+state.Changed += ApplyRoutes;
+
+// Routes match on the port a request came in on, not its Host header: a request through a tunnel
+// (frp, ngrok, cloudflared) arrives with the tunnel's public host name and no port.
+app.Use((context, next) =>
+{
+    context.Request.Headers[ProxyRoutes.ListenerHeader] = context.Connection.LocalPort.ToString();
+    return next(context);
+});
+app.UseRouting();
+
+// The admin API answers only to a localhost Host: tunneled requests also reach this port, and must
+// not be able to switch a developer's routing (to prod, say) or run commands from the internet.
+var admin = app.MapGroup("/_gw").RequireHost($"localhost:{gateway.Port}", $"127.0.0.1:{gateway.Port}");
+admin.MapGet("/state", (StatusBuilder status) => status.Snapshot());
+admin.MapPut("/backup", (BackupRequest request, StatusBuilder status) =>
+    state.SetBackup(request.Env) ? Results.Ok(status.Snapshot()) : Results.NotFound($"Unknown environment '{request.Env}'."));
+admin.MapPut("/services", (LocalRequest request, StatusBuilder status) =>
+{
+    state.SetAllLocal(request.Local);
+    return Results.Ok(status.Snapshot());
+});
+admin.MapPut("/services/{name}", (string name, LocalRequest request, StatusBuilder status) =>
+{
+    if (state.FindService(name) == null)
+        return Results.NotFound($"Unknown service '{name}'.");
+    // Toggling also releases a process stopped by hand, so local means running again.
+    if (request.Local && supervisor.Find(name) is { } mp)
+        supervisor.Start(mp);
+    else
+        state.SetLocal(name, request.Local);
+    return Results.Ok(status.Snapshot());
+});
+// A null workspace means the default checkout (for one service) or main (for all).
+admin.MapPut("/workspace", (WorkspaceRequest request, StatusBuilder status) =>
+{
+    var found = request.Workspace == null ? null : workspaces.Find(request.Workspace);
+    if (request.Workspace != null && found == null)
+        return Results.NotFound($"No checkout '{request.Workspace}'.");
+    state.SetWorkspace(null, found?.Name);
+    return Results.Ok(status.Snapshot());
+});
+admin.MapPut("/services/{name}/workspace", (string name, WorkspaceRequest request, StatusBuilder status) =>
+{
+    var found = request.Workspace == null ? null : workspaces.Find(request.Workspace);
+    if (request.Workspace != null && found == null)
+        return Results.NotFound($"No checkout '{request.Workspace}'.");
+    return state.SetWorkspace(name, found?.Name) ? Results.Ok(status.Snapshot()) : Results.NotFound($"Unknown service '{name}'.");
+});
+
+var processes = admin.MapGroup("/processes");
+processes.MapGet("/{name}", (string name) =>
+    supervisor.Find(name) is { } mp ? Results.Ok(StatusBuilder.Process(mp)) : Results.NotFound($"No process '{name}'."));
+processes.MapGet("/{name}/build", (string name) =>
+    supervisor.Find(name) is not { } mp ? Results.NotFound($"No process '{name}'.")
+    : mp.LastBuild is { } build ? Results.Ok(build)
+    : Results.NotFound($"{name} has not been built since the gateway started."));
+processes.MapGet("/{name}/logs", (string name, long? after, int? tail) =>
+    supervisor.Find(name) is { } mp
+        ? Results.Ok(mp.Log.Read(after ?? 0, Math.Clamp(tail ?? 200, 1, gateway.LogLines)))
+        : Results.NotFound($"No process '{name}'."));
+processes.MapPost("/{name}/{action}", (string name, string action, bool? restart) =>
+{
+    if (!supervisor.Enabled)
+        return Results.Conflict("The gateway runs with --no-processes and starts nothing.");
+    if (supervisor.Find(name) is not { } mp)
+        return Results.NotFound($"No process '{name}'.");
+    switch (action)
+    {
+        case "start": supervisor.Start(mp); break;
+        case "stop": supervisor.Stop(mp); break;
+        case "restart": supervisor.Restart(mp); break;
+        case "setup": supervisor.Setup(mp); break;
+        case "build":
+            if (!supervisor.Build(mp, restart ?? true))
+                return Results.BadRequest($"{name} is a {mp.Service.Process!.Type} process and has nothing to build.");
+            break;
+        default: return Results.NotFound($"Unknown action '{action}' (start, stop, restart, build, setup).");
+    }
+    return Results.Accepted(value: StatusBuilder.Process(mp));
+});
+
+app.MapReverseProxy();
+
+// Closing the terminal window sends SIGHUP; stop the children instead of leaving them behind.
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+using var hangup = OperatingSystem.IsWindows()
+    ? null
+    : PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>
+    {
+        context.Cancel = true;
+        lifetime.StopApplication();
+    });
+
+if (options.Headless)
+{
+    await app.RunAsync();
+    return;
+}
+
+await app.StartAsync();
+await Tui.Run(new GatewayClient(adminUrl), ownsGateway: true, lifetime.ApplicationStopping);
+try
+{
+    Console.WriteLine("Stopping switchyard and its processes...");
+}
+catch (IOException)
+{
+}
+await app.StopAsync();
+
+record BackupRequest(string Env);
+record LocalRequest(bool Local);
+record WorkspaceRequest(string? Workspace);
+
+/// <summary>The gateway's own flags, taken out before the rest reaches ASP.NET configuration.</summary>
+sealed record Flags(
+    bool Headless, bool Processes, string? AspNetEnvironment, string? Workspace, string? Config,
+    string? Command, string[] CommandArgs, string[] Rest)
+{
+    public static Flags Parse(string[] args)
+    {
+        var headless = Console.IsInputRedirected || Console.IsOutputRedirected;
+        var processes = true;
+        var env = Environment.GetEnvironmentVariable("SWITCHYARD_ENV") is { Length: > 0 } fromEnv ? fromEnv : null;
+        string? workspace = null, config = null, command = null;
+        var commandArgs = new List<string>();
+        var rest = new List<string>();
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (command != null)
+            {
+                // Commands take their own arguments; --config and settings (--Port=9000) are the gateway's.
+                if (args[i] == "--config" && i + 1 < args.Length)
+                    config = args[++i];
+                else if (args[i].StartsWith("--") && args[i].Contains('='))
+                    rest.Add(args[i]);
+                else
+                    commandArgs.Add(args[i]);
+                continue;
+            }
+            switch (args[i])
+            {
+                case "--headless": headless = true; break;
+                case "--no-processes": processes = false; break;
+                case "--env" when i + 1 < args.Length: env = args[++i]; break;
+                case "--workspace" when i + 1 < args.Length: workspace = args[++i]; break;
+                case "--config" when i + 1 < args.Length: config = args[++i]; break;
+                case var verb when rest.Count == 0 && Cli.Commands.Contains(verb): command = verb; headless = true; break;
+                default: rest.Add(args[i]); break;
+            }
+        }
+        return new Flags(headless, processes, env, workspace, config, command, [.. commandArgs], [.. rest]);
+    }
+}

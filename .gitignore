@@ -1,0 +1,8 @@
+bin/
+obj/
+artifacts/
+*.user
+.vs/
+.idea/
+# Per-developer overrides of a project's switchyard.json
+switchyard.user.json

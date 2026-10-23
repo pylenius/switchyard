@@ -1,0 +1,49 @@
+// Example switchyard.json: put it in the root of your repository and run switchyard there.
+// Two .NET APIs, a Vite frontend and a Postgres container; every key is in GatewayOptions.cs.
+{
+  "Name": "shop",
+  "Port": 8088,
+  // Local paths match the deployed ones: http://localhost:8088/api/orders/... -> orders.
+  "RoutePrefix": "/api/{name}",
+  // ASP.NET environment the dotnet services run as (--env overrides it).
+  "RunAs": "Development",
+  // Where a service goes when it is not run locally; "api" matches each service's Upstream.
+  "Environments": [
+    { "Name": "dev", "Upstreams": { "api": "https://dev-api.example.com" } },
+    { "Name": "staging", "Upstreams": { "api": "https://staging-api.example.com" }, "Color": "yellow" },
+    { "Name": "prod", "Upstreams": { "api": "https://api.example.com" }, "Color": "red", "Warn": true }
+  ],
+  // Given to every process.
+  "ProcessEnv": { "Logging__LogLevel__Default": "Information" },
+  "Services": [
+    {
+      "Name": "orders", "LocalUrl": "http://localhost:5100", "Health": "/health",
+      "Process": {
+        "Type": "dotnet", "Project": "src/Orders.Api/Orders.Api.csproj",
+        // catalog is waited for while it runs locally; db is always started along.
+        "DependsOn": [ "catalog", "db" ],
+        "Env": { "ConnectionStrings__Orders": "Host=localhost;Port=5433;Database=orders;Username=dev;Password=dev" },
+        // A secret from your vault, read once when the gateway starts it (unless already set).
+        "EnvFromCommand": { "Payments__ApiKey": [ "op", "read", "op://dev/payments/api-key" ] }
+      }
+    },
+    {
+      "Name": "catalog", "LocalUrl": "http://localhost:5200", "Health": "/health",
+      "Process": { "Type": "dotnet", "Project": "src/Catalog.Api/Catalog.Api.csproj" }
+    },
+    {
+      // Not routed (no LocalUrl): only run.
+      "Name": "db", "Group": "infra",
+      "Process": {
+        "Type": "docker", "Image": "postgres:18-alpine", "Container": "shop-db", "Port": 5433,
+        "Ports": [ "5433:5432" ], "Volumes": [ "shop-db:/var/lib/postgresql" ],
+        "Env": { "POSTGRES_USER": "dev", "POSTGRES_PASSWORD": "dev", "POSTGRES_DB": "orders" },
+        "ReadyExec": [ "pg_isready", "-U", "dev" ]
+      }
+    },
+    {
+      "Name": "web", "Group": "frontend",
+      "Process": { "Type": "vite", "Dir": "web", "Port": 5173 }
+    }
+  ]
+}
