@@ -194,6 +194,7 @@ version and publishes it to nuget.org:
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Publishing needs a nuget.org API key (scope: push, package `Switchyard`) in the repository secret
-`NUGET_API_KEY`.
+Publishing uses [NuGet trusted publishing](https://aka.ms/nuget/trusted-publishing): a nuget.org
+policy (owner `pylenius`, repository `pylenius/switchyard`, workflow `ci.yml`, package `Switchyard`)
+lets that workflow exchange its GitHub OIDC token for a short-lived API key. No key is stored.
 
