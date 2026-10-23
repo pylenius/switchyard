@@ -125,6 +125,27 @@ public static class Cli
             }
         }
 
+        // A successful build restarts a running service; wait for that too, so the next command meets it running.
+        if (restart)
+        {
+            foreach (var name in names)
+            {
+                if ((await client.GetBuild(name))?.Success != true)
+                    continue;
+                for (var i = 0; i < 240; i++)
+                {
+                    var p = await client.GetProcess(name);
+                    if (p is null || !p.Busy)
+                    {
+                        if (p?.Pid != null)
+                            Console.WriteLine($"[{name}] {p.State.ToString().ToLowerInvariant()}, pid {p.Pid}");
+                        break;
+                    }
+                    await Task.Delay(500);
+                }
+            }
+        }
+
         var failed = 0;
         Console.WriteLine();
         foreach (var name in names)

@@ -354,6 +354,7 @@ public sealed class ProcessSupervisor : BackgroundService
                 ? $"{info.FileName} was not found; is it installed and on PATH?"
                 : $"could not start {info.FileName}: {ex.Message}");
         }
+        WindowsJob.Contain(process);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         (mp.Process, mp.RunningIn, mp.StartedAt) = (process, ws, DateTime.Now);
@@ -373,6 +374,7 @@ public sealed class ProcessSupervisor : BackgroundService
         catch (Exception)
         {
         }
+        WindowsJob.Release(process.Id);
         if (mp.Process != process)
             return;
 
@@ -400,6 +402,9 @@ public sealed class ProcessSupervisor : BackgroundService
             if (await IsReady(mp, context, ct))
             {
                 (mp.State, mp.Detail) = (ProcessState.Running, null);
+                // It just answered; do not wait for the next port probe to say so.
+                if (mp.Service.Routed)
+                    _state.SetLocalUp(mp.Name, true);
                 mp.Log.Add("sys", $"ready after {(DateTime.Now - mp.StartedAt!.Value).TotalSeconds:0.0}s");
                 return;
             }

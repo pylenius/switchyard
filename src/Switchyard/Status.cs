@@ -41,7 +41,8 @@ public sealed record ProcessSnapshot(
     bool Building,
     bool CanBuild,
     BuildSummary? LastBuild,
-    long LogSeq);
+    long LogSeq,
+    bool Busy = false);
 
 public sealed record BuildSummary(bool Success, DateTime FinishedAt, double Seconds, int Warnings, int Errors);
 
@@ -94,6 +95,7 @@ public sealed class StatusBuilder(IOptions<GatewayOptions> options, GatewayState
             mp.Building,
             mp.Type.CanBuild,
             mp.LastBuild is { } b ? new BuildSummary(b.Success, b.FinishedAt, b.Seconds, b.Warnings, b.Errors.Count) : null,
-            mp.Log.LastSeq);
+            mp.Log.LastSeq,
+            mp.Busy);
     }
 }

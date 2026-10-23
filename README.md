@@ -167,9 +167,15 @@ but not `/_gw`.
 
 ## Windows
 
-Processes are killed rather than asked to stop (console processes there have no SIGTERM), so a
-service's shutdown hooks do not run. `npm`, `npx` and other `.cmd` tools are started through
-`cmd.exe`.
+- Each process runs in its own Job Object. Stopping it ends the whole job, so nothing a tool started
+  in between survives (`npm run dev` is cmd → npm → cmd → node). If the gateway itself dies, Windows
+  ends its processes too.
+- Processes are killed rather than asked to stop (console processes there have no SIGTERM), so a
+  service's shutdown hooks do not run.
+- A running .NET service is stopped *before* its rebuild, because Windows locks a loaded dll. A build
+  with errors therefore leaves it down until the next successful build (elsewhere the old build keeps
+  serving).
+- `npm`, `npx` and other `.cmd` tools are started through `cmd.exe`.
 
 ## Building
 

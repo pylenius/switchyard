@@ -71,8 +71,15 @@ public abstract class ProjectType
     /// <summary>SIGTERM to the process tree, then kill it after <see cref="ProcessOptions.ShutdownSeconds"/>.</summary>
     public virtual async Task Stop(RunContext context, Process process)
     {
+        if (ProcessTools.IsWindows)
+        {
+            // Console processes there have no polite stop signal to send.
+            context.Log.Add("sys", "killing the process tree (Windows has no SIGTERM)");
+            ProcessTools.KillTree(process);
+            return;
+        }
         ProcessTools.SignalTree(process);
-        using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(ProcessTools.IsWindows ? 0 : context.Process.ShutdownSeconds));
+        using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(context.Process.ShutdownSeconds));
         try
         {
             await process.WaitForExitAsync(grace.Token);

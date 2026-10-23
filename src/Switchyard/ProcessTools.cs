@@ -24,6 +24,9 @@ public static partial class ProcessTools
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
+            // node and most CLIs write UTF-8; the Windows default would read it as the OEM code page.
+            StandardOutputEncoding = new System.Text.UTF8Encoding(false),
+            StandardErrorEncoding = new System.Text.UTF8Encoding(false),
         };
 
         if (IsWindows && FindOnPath(command) is { } found
@@ -117,6 +120,8 @@ public static partial class ProcessTools
     {
         try
         {
+            if (WindowsJob.Terminate(process.Id))
+                return;
             if (!process.HasExited)
                 process.Kill(entireProcessTree: true);
         }
