@@ -19,6 +19,7 @@
     <PackageProjectUrl>https://github.com/pylenius/switchyard</PackageProjectUrl>
     <RepositoryUrl>https://github.com/pylenius/switchyard</RepositoryUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>
