@@ -40,7 +40,20 @@ public sealed class ManagedProcess(ServiceOptions service, LogBuffer log)
     internal CancellationTokenSource? OpCts;
     internal string? OpKind;
 
-    public bool Alive => Process is { HasExited: false };
+    public bool Alive => IsRunning(Process);
+
+    /// <summary>Watch disposes a process once it exits, possibly between reading <see cref="Process"/> and asking it.</summary>
+    public static bool IsRunning(Process? process)
+    {
+        try
+        {
+            return process is { HasExited: false };
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
     public bool Busy => Volatile.Read(ref Ops) > 0;
 }
 
@@ -360,9 +373,9 @@ public sealed class ProcessSupervisor : BackgroundService
         (mp.Process, mp.RunningIn, mp.StartedAt) = (process, ws, DateTime.Now);
         mp.Log.Add("sys", $"pid {process.Id}: {info.FileName} {string.Join(' ', info.ArgumentList)}");
         RecordPid(mp, process);
-        _ = Watch(mp, process);
+        var exited = Watch(mp, process);
 
-        await WaitReady(mp, context, process, ct);
+        await WaitReady(mp, context, exited, ct);
     }
 
     async Task Watch(ManagedProcess mp, Process process)
@@ -393,11 +406,15 @@ public sealed class ProcessSupervisor : BackgroundService
         Signal();
     }
 
-    async Task WaitReady(ManagedProcess mp, RunContext context, Process process, CancellationToken ct)
+    /// <summary>
+    /// Until it answers or exits. The exit is <paramref name="exited"/>, not the process: Watch disposes the
+    /// process when it exits, and asking a disposed one throws (which held the service instead of restarting it).
+    /// </summary>
+    async Task WaitReady(ManagedProcess mp, RunContext context, Task exited, CancellationToken ct)
     {
         var deadline = DateTime.Now + ReadyTimeout;
         await Task.Delay(500, ct);
-        while (!process.HasExited)
+        while (!exited.IsCompleted)
         {
             if (await IsReady(mp, context, ct))
             {
@@ -438,7 +455,7 @@ public sealed class ProcessSupervisor : BackgroundService
 
     async Task StopCore(ManagedProcess mp)
     {
-        if (mp.Process is not { } process || process.HasExited)
+        if (mp.Process is not { } process || !ManagedProcess.IsRunning(process))
         {
             if (mp.State != ProcessState.External)
                 mp.State = ProcessState.Stopped;
