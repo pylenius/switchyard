@@ -127,6 +127,30 @@ one default for all services, and each can have its own. Builds happen in the ch
 runs from, so a new worktree needs nothing set up: the first start restores, builds and runs `npm ci`
 there.
 
+```bash
+git worktree add -b my-feature ../shop-my-feature   # the checkout is named after the folder: shop-my-feature
+switchyard workspace                                # lists it (worktrees are re-read every few seconds)
+switchyard workspace shop-my-feature orders         # orders now builds and runs from there; the rest stay
+switchyard build orders                             # works from either folder: both find the same switchyard.json
+switchyard workspace default orders                 # back to the default checkout, before `git worktree remove ../shop-my-feature`
+```
+
+- Switching stops the service, then builds and starts it from the new checkout. `switchyard status`
+  shows the checkout each service runs from.
+- `default` undoes a switch: the service follows the default checkout again. Naming a checkout
+  (`main`) pins it there, even when the default changes later.
+
+- The first start in a new worktree is a full restore and build, so it takes longer.
+- A worktree has only what git tracks: files the repository ignores (local secrets such as
+  `appsettings.Local.json`, `.env`) and uncommitted changes in the main checkout are not there. Copy
+  what the service needs.
+- The commands inside a worktree reach the same gateway, because its `switchyard.json` has the same
+  `Name` and `Port`. Do not start a second gateway there; it is refused while one runs.
+- The gateway is shared: switching a service changes what everything behind it sees, the browser and
+  the tunnel included.
+- `switchyard workspace my-feature` without names moves the default, so every service that has no
+  checkout of its own follows it.
+
 ## Configuration
 
 `switchyard.json` is found in the current folder or the nearest one above it (or `--config`,
