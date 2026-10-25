@@ -26,15 +26,17 @@ public static class ProxyRoutes
         foreach (var service in state.RoutedServices)
         {
             var clusterId = $"svc-{service.Name}";
-            routes.Add(new RouteConfig
+            // A service on its own port takes every path there; otherwise one route per path, all to its cluster.
+            var matches = service.Port is { } ownPort
+                ? [OnPort(ownPort, "/{**rest}")]
+                : service.PathPrefixes.Select(prefix => OnPort(port, $"{prefix}/{{**rest}}")).ToList();
+            routes.AddRange(matches.Select((match, i) => new RouteConfig
             {
-                RouteId = service.Name,
+                RouteId = i == 0 ? service.Name : $"{service.Name}#{i}",
                 ClusterId = clusterId,
-                Match = service.Port is { } ownPort
-                    ? OnPort(ownPort, "/{**rest}")
-                    : OnPort(port, $"{service.PathPrefix}/{{**rest}}"),
+                Match = match,
                 Transforms = [new Dictionary<string, string> { ["RequestHeaderRemove"] = ListenerHeader }],
-            });
+            }));
             clusters.Add(new ClusterConfig
             {
                 ClusterId = clusterId,

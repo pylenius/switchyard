@@ -40,7 +40,17 @@ var gatewayConfig = new ConfigurationBuilder()
     .AddJsonFile(Path.Combine(configDirectory, GatewayOptions.UserConfigFile), optional: true)
     .AddCommandLine(options.Rest)
     .Build();
-var gateway = (gatewayConfig.Get<GatewayOptions>() ?? new GatewayOptions()).Resolve(configDirectory);
+GatewayOptions gateway;
+try
+{
+    gateway = (gatewayConfig.Get<GatewayOptions>() ?? new GatewayOptions()).Resolve(configDirectory);
+}
+catch (InvalidOperationException ex)
+{
+    Console.Error.WriteLine($"{configPath}: {ex.Message}");
+    Environment.ExitCode = 2;
+    return;
+}
 var adminUrl = $"http://localhost:{gateway.Port}/_gw/";
 var runAs = options.AspNetEnvironment ?? gateway.RunAs;
 

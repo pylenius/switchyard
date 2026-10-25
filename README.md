@@ -169,7 +169,7 @@ or `$SWITCHYARD_CONFIG`). Every key is documented in [`GatewayOptions.cs`](src/S
 | `StateFile` | `~/.config/switchyard/{Name}/state.json` | routing, backup environment and checkouts, kept across restarts |
 | `ProcessEnv` | | environment variables for every process |
 | `Environments` | | `Name`, `Upstreams` (`{ "api": "https://..." }`), `Color`, `Warn` |
-| `Services` | | `Name`, `LocalUrl` (empty: run but not routed), `Port` (own listener, every path), `Upstream`, `Health`, `Group`, `Process` |
+| `Services` | | `Name`, `LocalUrl` (empty: run but not routed), `PathPrefix` or `PathPrefixes` (`""`: every path), `Port` (own listener, every path), `Upstream`, `Health`, `Group`, `Process` |
 
 `Process` holds the type and its settings (`Project`, `Dir`, `Command`, `Args`, `Image`, ...), `Env`,
 `DependsOn` and `ShutdownSeconds`. `Env` values expand `${VAR}`, `${VAR:-default}`, `{env}` and
@@ -224,6 +224,22 @@ moment while the next holder's checkout builds.
 every path, native redis, postgres in docker, a tunnel and a frontend.
 
 **One backend for every path.** `"PathPrefix": ""` routes everything to it rather than `/{name}/...`.
+
+**A backend on some paths, the frontend on the rest.** The more specific path wins, so a frontend on `""`
+gets every path the backend does not list. Toggle either one off and only its paths go to the backup
+environment, so a local frontend can run against a deployed backend and the other way round.
+
+```json
+{ "Name": "backend", "LocalUrl": "http://localhost:5000", "PathPrefixes": [ "/api", "/hubs", "/.well-known" ],
+  "Process": { "Type": "dotnet", "Project": "src/App.Web/App.Web.csproj" } },
+{ "Name": "web", "LocalUrl": "http://localhost:5173", "PathPrefix": "",
+  "Process": { "Type": "vite", "Dir": "web", "Port": 5173 } }
+```
+
+Paths match whole segments and ignore case: `/files` routes `/files/1` but not `/filesystem`. The app has to
+call its own origin (`/api/...`, not an absolute URL) for this to work through a tunnel too; vite's
+hot reload goes through the gateway as a websocket, and behind a https tunnel it may need
+`server.hmr.clientPort: 443`.
 
 **A program installed on the machine.** A `command` with a `Port` is ready once the port answers, so a
 service that `DependsOn` it waits for it:

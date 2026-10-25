@@ -58,7 +58,15 @@ public sealed class GatewayOptions
         if (Name == "")
             Name = Path.GetFileName(RepoRoot.TrimEnd('/', '\\'));
         foreach (var service in Services)
-            service.PathPrefix ??= RoutePrefix.Replace("{name}", service.Name).TrimEnd('/');
+        {
+            if (service.PathPrefix != null && service.PathPrefixes.Count > 0)
+                throw new InvalidOperationException($"{service.Name}: give PathPrefix or PathPrefixes, not both.");
+            var prefixes = service.PathPrefixes.Count > 0 ? service.PathPrefixes
+                : [service.PathPrefix ?? RoutePrefix.Replace("{name}", service.Name)];
+            // "/api/", "api" and "/api" are the same route; "" and "/" are every path.
+            service.PathPrefixes = [.. prefixes.Select(p => p.Trim().Trim('/')).Select(p => p == "" ? "" : "/" + p).Distinct(StringComparer.OrdinalIgnoreCase)];
+            service.PathPrefix = service.PathPrefixes[0];
+        }
         return this;
     }
 
@@ -116,11 +124,20 @@ public sealed class ServiceOptions
     /// <summary>How the gateway starts and builds it. Without it the gateway only routes to whatever runs on the port.</summary>
     public ProcessOptions? Process { get; set; }
 
-    /// <summary>Path it is routed on; default from <see cref="GatewayOptions.RoutePrefix"/>.</summary>
+    /// <summary>Path it is routed on; default from <see cref="GatewayOptions.RoutePrefix"/>. "" routes every path.</summary>
     public string? PathPrefix { get; set; }
 
+    /// <summary>
+    /// Several paths for one service, e.g. a backend's ["/api", "/hubs"] next to a frontend on "": every
+    /// path the other services do not claim. The more specific path wins, whatever the order of the services.
+    /// </summary>
+    public List<string> PathPrefixes { get; set; } = [];
+
     public bool Routed => LocalUrl != "";
-    public string Route => !Routed ? "" : Port is { } port ? $":{port}" : PathPrefix ?? "";
+
+    /// <summary>For the UI and status: the first path ("/" for every path), "+N" for the others.</summary>
+    public string Route => !Routed ? "" : Port is { } port ? $":{port}"
+        : (PathPrefixes.FirstOrDefault() is { Length: > 0 } first ? first : "/") + (PathPrefixes.Count > 1 ? $" +{PathPrefixes.Count - 1}" : "");
 }
 
 public sealed class ProcessOptions
