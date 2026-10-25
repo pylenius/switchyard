@@ -12,10 +12,28 @@ namespace Switchyard;
 ///   run setup <name>                  reinstall dependencies (vite: rm -rf node_modules, npm ci)
 ///   run workspace                     list the checkouts
 ///   run workspace <checkout> [name...]  default checkout for all, or for the named services ("default" follows the default)
+///   run which                         the config, state folder and ports this folder uses; needs no running gateway
 /// </summary>
 public static class Cli
 {
-    public static readonly HashSet<string> Commands = ["status", "start", "stop", "restart", "build", "errors", "logs", "setup", "workspace"];
+    public static readonly HashSet<string> Commands = ["status", "start", "stop", "restart", "build", "errors", "logs", "setup", "workspace", "which"];
+
+    /// <summary>Which gateway this folder belongs to: with several projects each on its own port, the one the commands here talk to.</summary>
+    public static async Task<int> Which(string configPath, GatewayOptions gateway, GatewayClient client)
+    {
+        var running = await GatewayClient.IsRunning(client.AdminUrl);
+        Console.WriteLine($"config   {configPath}");
+        Console.WriteLine($"name     {gateway.Name}");
+        Console.WriteLine($"state    {gateway.StateDirectory}");
+        Console.WriteLine($"gateway  http://localhost:{gateway.Port}  {(running ? "running" : "not running")}");
+        foreach (var service in gateway.Services)
+        {
+            var ports = new[] { service.Port, service.Process?.Port }.OfType<int>().Distinct().Select(p => $":{p}");
+            var url = service.Routed ? service.LocalUrl : "";
+            Console.WriteLine($"  {service.Name,-16} {url,-28} {string.Join(" ", ports)}".TrimEnd());
+        }
+        return 0;
+    }
 
     public static async Task<int> Run(string command, string[] args, GatewayClient client)
     {

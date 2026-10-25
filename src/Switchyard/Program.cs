@@ -13,9 +13,15 @@ using Yarp.ReverseProxy.Configuration;
 //   run --config <file|folder>   the switchyard.json to use (default: found from the current folder up)
 //   run --env Beta               ASP.NET environment for the dotnet services (default: RunAs, or $SWITCHYARD_ENV)
 //   run --workspace <worktree>   default checkout for the services (saved for next time)
-//   run status | start | stop | restart | build | errors | logs | setup | workspace ...   see Cli.cs
+//   run status | start | stop | restart | build | errors | logs | setup | workspace | which ...   see Cli.cs
 //   any setting from the config file can be given too, e.g. --Port=9000
 var options = Flags.Parse(args);
+
+if (options.Help)
+{
+    Console.WriteLine(Flags.Usage);
+    return;
+}
 
 if (GatewayOptions.FindConfig(options.Config) is not { } configPath || !File.Exists(configPath))
 {
@@ -38,6 +44,12 @@ var gateway = (gatewayConfig.Get<GatewayOptions>() ?? new GatewayOptions()).Reso
 var adminUrl = $"http://localhost:{gateway.Port}/_gw/";
 var runAs = options.AspNetEnvironment ?? gateway.RunAs;
 
+if (options.Command == "which")
+{
+    Environment.ExitCode = await Cli.Which(configPath, gateway, new GatewayClient(adminUrl));
+    return;
+}
+
 if (options.Command != null)
 {
     Environment.ExitCode = await Cli.Run(options.Command, options.CommandArgs, new GatewayClient(adminUrl));
@@ -48,6 +60,39 @@ if (!options.Headless && await GatewayClient.IsRunning(adminUrl))
 {
     await Tui.Run(new GatewayClient(adminUrl), ownsGateway: false, CancellationToken.None);
     return;
+}
+
+// Checked before the host starts: the supervisor stops the processes in the pid file as leftovers of the
+// last run, and with a gateway still running those are its live processes. Kestrel only binds after that.
+// The lock is what makes it safe (held until this process exits, whatever port either gateway was given);
+// the checks before it only give a better message.
+if (await GatewayClient.IsRunning(adminUrl))
+{
+    Console.Error.WriteLine($"Switchyard is already running ({adminUrl}). Run switchyard without --headless to attach to it, or use the commands.");
+    Environment.ExitCode = 1;
+    return;
+}
+Directory.CreateDirectory(gateway.StateDirectory);
+FileStream stateLock;
+try
+{
+    stateLock = new FileStream(Path.Combine(gateway.StateDirectory, "gateway.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+}
+catch (IOException)
+{
+    Console.Error.WriteLine($"Another switchyard gateway is running with {gateway.StateDirectory}; stop it first, or attach to it.");
+    Environment.ExitCode = 1;
+    return;
+}
+using var heldLock = stateLock;
+foreach (var port in gateway.Services.Select(s => s.Port).OfType<int>().Prepend(gateway.Port).Distinct())
+{
+    if (await PortInUse(port))
+    {
+        Console.Error.WriteLine($"Port {port} is in use by another program; switchyard needs it (set Port in switchyard.user.json, or --Port=9000).");
+        Environment.ExitCode = 1;
+        return;
+    }
 }
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -213,6 +258,26 @@ catch (IOException)
 }
 await app.StopAsync();
 
+// A connect, not a test bind: a listener on the IPv6 wildcard leaves 127.0.0.1 bindable on macOS.
+static async Task<bool> PortInUse(int port)
+{
+    foreach (var address in new[] { System.Net.IPAddress.Loopback, System.Net.IPAddress.IPv6Loopback })
+    {
+        try
+        {
+            using var client = new System.Net.Sockets.TcpClient(address.AddressFamily);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+            await client.ConnectAsync(address, port, timeout.Token);
+            return true;
+        }
+        catch (Exception)
+        {
+            // Refused or unreachable: nothing listens there.
+        }
+    }
+    return false;
+}
+
 record BackupRequest(string Env);
 record LocalRequest(bool Local);
 record WorkspaceRequest(string? Workspace);
@@ -220,8 +285,28 @@ record WorkspaceRequest(string? Workspace);
 /// <summary>The gateway's own flags, taken out before the rest reaches ASP.NET configuration.</summary>
 sealed record Flags(
     bool Headless, bool Processes, string? AspNetEnvironment, string? Workspace, string? Config,
-    string? Command, string[] CommandArgs, string[] Rest)
+    string? Command, string[] CommandArgs, string[] Rest, bool Help = false)
 {
+    public const string Usage = """
+        switchyard                          text UI; attaches to a running gateway, or starts one in-process
+        switchyard --headless               gateway only; control it through /_gw or the commands below
+        switchyard --no-processes           route only, start nothing (when something else runs the services)
+        switchyard --config <file|folder>   the switchyard.json to use (default: found from the current folder up)
+        switchyard --env Beta               ASP.NET environment for the dotnet services (default: RunAs, or $SWITCHYARD_ENV)
+        switchyard --workspace <worktree>   default checkout for the services (saved for next time)
+        any setting from the config file can be given too, e.g. --Port=9000
+
+        Commands, against a running gateway:
+          status                            every process: local/backup, state, build, checkout
+          start|stop|restart <name...>      start makes it local; stop keeps it local but stopped
+          build <name...|all> [--no-restart]  build, print the output and errors, restart if it runs; exit 1 on errors
+          errors <name>                     the last build's errors as file:line:col
+          logs <name> [-n 200] [-f]         the last lines, -f follows
+          setup <name>                      reinstall dependencies (vite: rm -rf node_modules, npm ci)
+          workspace [<checkout> [name...]]  list the checkouts, or set the default one
+          which                             the config, state folder and ports this folder uses (no gateway needed)
+        """;
+
     public static Flags Parse(string[] args)
     {
         var headless = Console.IsInputRedirected || Console.IsOutputRedirected;
@@ -245,6 +330,8 @@ sealed record Flags(
             }
             switch (args[i])
             {
+                case "--help" or "-h" or "help" when rest.Count == 0:
+                    return new Flags(headless, processes, env, workspace, config, null, [], [], Help: true);
                 case "--headless": headless = true; break;
                 case "--no-processes": processes = false; break;
                 case "--env" when i + 1 < args.Length: env = args[++i]; break;

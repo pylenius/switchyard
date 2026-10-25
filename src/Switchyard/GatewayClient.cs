@@ -18,7 +18,12 @@ public sealed class GatewayClient(string adminUrl)
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
-            return (await http.GetAsync(adminUrl + "state")).IsSuccessStatusCode;
+            using var response = await http.GetAsync(adminUrl + "state");
+            if (!response.IsSuccessStatusCode)
+                return false;
+            // Another app on the port can answer 2xx too (an SPA fallback page); only a gateway sends its state.
+            using var state = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            return state.RootElement.ValueKind == JsonValueKind.Object && state.RootElement.TryGetProperty("services", out _);
         }
         catch (Exception)
         {

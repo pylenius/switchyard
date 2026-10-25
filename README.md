@@ -40,7 +40,9 @@ dotnet run --project src/Switchyard --  # from source
 ```
 
 With no command it attaches to a gateway that is already running. If none is, it starts one
-in-process; quitting then asks before it stops the processes.
+in-process; quitting then asks before it stops the processes. One gateway runs per state folder
+(per `Name`): a second one for the same project exits instead of taking over its processes. Projects
+with different names and ports run side by side. `switchyard --help` lists the flags and commands.
 
 `--no-processes` makes it route only, for when something else runs the services.
 
@@ -90,6 +92,7 @@ switchyard stop orders            # stays local but stopped (run it from the IDE
 switchyard setup web              # rm -rf node_modules && npm ci
 switchyard workspace                      # list the checkouts
 switchyard workspace my-feature orders    # orders from that worktree ("default" follows the default)
+switchyard which                  # config, state folder, gateway URL and ports for this folder; no gateway needed
 ```
 
 ## Processes
