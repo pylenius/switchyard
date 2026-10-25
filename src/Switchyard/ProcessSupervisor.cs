@@ -142,7 +142,18 @@ public sealed class ProcessSupervisor : BackgroundService
         var alive = _processes.Values.Where(p => p.Alive).ToList();
         if (alive.Count > 0)
             _logger.LogInformation("Stopping {Count} processes", alive.Count);
-        await Task.WhenAll(alive.Select(StopCore));
+        // One that fails to stop must not crash the shutdown: the others still have to be stopped.
+        await Task.WhenAll(alive.Select(async mp =>
+        {
+            try
+            {
+                await StopCore(mp);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("{Name}: stop failed: {Message}", mp.Name, ex.Message);
+            }
+        }));
         await base.StopAsync(cancellationToken);
     }
 

@@ -88,6 +88,10 @@ public abstract class ProjectType
         {
             context.Log.Add("sys", $"did not stop in {context.Process.ShutdownSeconds}s, killing");
         }
+        catch (InvalidOperationException)
+        {
+            // Exited, and the supervisor's watcher has disposed it already.
+        }
         ProcessTools.KillTree(process);
     }
 
@@ -273,7 +277,14 @@ public sealed class DockerProject : ProjectType
         catch (OperationCanceledException)
         {
         }
+        catch (InvalidOperationException)
+        {
+            // `docker stop` ended the client too, and the supervisor's watcher has disposed it already.
+        }
         ProcessTools.KillTree(process);
+        // Stopped while `docker run` was still pulling, the daemon creates the container after the client is
+        // gone, and `docker stop` found nothing to stop: remove whatever is there now.
+        await ProcessTools.Run("docker", ["rm", "-f", Container(context)], context.Workspace.Path, null, CancellationToken.None);
     }
 }
 
