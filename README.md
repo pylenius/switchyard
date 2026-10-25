@@ -251,18 +251,46 @@ curl -fsS localhost:8088/_gw/state | node -e '
   || { echo "backend is not local: toggle it on in switchyard"; exit 1; }
 ```
 
-**Telling a coding agent.** A section like this in the repository's `CLAUDE.md` or `AGENTS.md`:
+**Telling a coding agent.** Agents do not know any of this unless the repository says it. Put a section
+like this in `CLAUDE.md` or `AGENTS.md`, with your own service names and test command. This one was
+tested with three agents working at once, each in its own worktree:
 
 ```markdown
-## Dev environment
-switchyard runs the services (switchyard.json). Against a running gateway:
-- `switchyard status` first: what runs, where it is routed, the last build.
-- Build with `switchyard build backend` (errors as file:line:col, exit 1 on errors; restarts it), not
-  `dotnet build` or `dotnet run`: a second instance competes for the port, and a plain build leaves
-  the running one on the old code.
-- `switchyard logs backend -n 200`, `switchyard restart frontend`.
-- `switchyard which` says which config and ports this folder uses, even with no gateway running.
+## Dev environment (switchyard)
+switchyard runs the services (switchyard.json); several agents may share it at once, each in its own
+git worktree.
+- **Compile and unit-test in your own checkout** with the usual tools (`dotnet build`, `dotnet test`,
+  `npm run test:unit`). They run in parallel with other agents. Not `switchyard build`: it compiles the
+  checkout the service runs from, which may be another agent's.
+- **Run anything against the stack as one claimed command**, in the foreground, from your checkout:
+  `switchyard claim --as <your-branch> --wait -- npm run test:e2e`
+  It waits behind another agent, runs the backend and frontend from your checkout, runs the command and
+  releases when it ends, also on failure; its exit code is the command's. It needs no release. Join
+  steps with `&&`: `-- sh -c 'curl -fsS localhost:8088/health && npm run test:e2e'`.
+- Never run `claim --wait` in the background or through a pipe, and do not end your turn waiting for it.
+- "Claimed by X since ..." means another agent is testing: wait. Never `--force` unless the user says so.
+- Never start a second gateway, and never run a service yourself on its port (`dotnet run`).
+- Worktrees: `git worktree add -b <branch> ../<repo>-<branch>`. They lack ignored files (local secrets
+  such as `appsettings.Local.json`, `.env`); copy what the service needs.
+- `switchyard status` shows who holds it and which checkout each service runs from; `switchyard logs
+  backend -n 200` its output. Reads need no `--as`.
 ```
+
+What each line prevents, from that test:
+
+- **Compile in your own checkout**: `switchyard build` from a worktree reports another agent's build as
+  yours.
+- **One claimed command**: an agent that claims, then tests, then releases as separate steps can leave
+  the stack held while it does something else. Two of three did in the first try.
+- **Not in the background**: an agent that started `claim --wait` in the background and ended its turn
+  was not woken when it returned, and held the gateway idle for minutes. With a command, the claim
+  cannot outlive the test whatever the agent does.
+- **`&&`**: all three agents wrote `;`, which runs the test even when the check before it fails.
+- **Read the file**: subagents may get the `CLAUDE.md` their parent session loaded when it started.
+  After changing these instructions, start new sessions, or tell agents to read the file.
+
+A test script can also refuse to run against the wrong checkout: compare the `runningIn` checkout of the
+service in `/_gw/state` (its path is in `workspaces`) with the repository the script is in.
 
 **Coming from process-compose (or a start script).** Each process becomes a service: an API you route
 to gets a `LocalUrl` (`dotnet` or `command`), the rest become unrouted `command`, `docker` or `vite`
