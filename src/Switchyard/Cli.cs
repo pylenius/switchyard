@@ -21,11 +21,15 @@ public static class Cli
     /// <summary>Which gateway this folder belongs to: with several projects each on its own port, the one the commands here talk to.</summary>
     public static async Task<int> Which(string configPath, GatewayOptions gateway, GatewayClient client)
     {
-        var running = await GatewayClient.IsRunning(client.AdminUrl);
+        // The port may be another project's gateway (two configs with the same Port): say whose it is.
+        var answering = await GatewayClient.IsRunning(client.AdminUrl) ? (await client.GetState())?.Name : null;
+        var running = answering == null ? "not running"
+            : string.Equals(answering, gateway.Name, StringComparison.OrdinalIgnoreCase) ? "running"
+            : $"in use by the gateway of '{answering}'";
         Console.WriteLine($"config   {configPath}");
         Console.WriteLine($"name     {gateway.Name}");
         Console.WriteLine($"state    {gateway.StateDirectory}");
-        Console.WriteLine($"gateway  http://localhost:{gateway.Port}  {(running ? "running" : "not running")}");
+        Console.WriteLine($"gateway  http://localhost:{gateway.Port}  {running}");
         foreach (var service in gateway.Services)
         {
             var ports = new[] { service.Port, service.Process?.Port }.OfType<int>().Distinct().Select(p => $":{p}");

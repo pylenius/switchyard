@@ -1,0 +1,44 @@
+// A single backend that serves every path, with its infrastructure, a tunnel for webhooks and a
+// frontend. Modelled on a real setup; every key is in GatewayOptions.cs.
+{
+  "Name": "app",
+  "Port": 8088,
+  "Environments": [
+    { "Name": "test", "Upstreams": { "api": "https://test.example.com" }, "Color": "yellow" },
+    { "Name": "prod", "Upstreams": { "api": "https://www.example.com" }, "Color": "red", "Warn": true }
+  ],
+  "Services": [
+    {
+      // "" routes every path to it, instead of /{name}.
+      "Name": "backend", "LocalUrl": "http://localhost:5000", "Health": "/health", "PathPrefix": "",
+      "Process": { "Type": "dotnet", "Project": "src/App.Web/App.Web.csproj", "DependsOn": [ "redis", "postgres" ] }
+    },
+    {
+      // A program installed on the machine (here Homebrew's redis); ready once its port answers.
+      "Name": "redis", "Group": "infra",
+      "Process": { "Type": "command", "Command": "redis-server", "Args": [ "/opt/homebrew/etc/redis.conf" ], "Port": 6379 }
+    },
+    {
+      // The data must be in a named volume: the container runs with --rm, which deletes an anonymous one.
+      // Up to postgres 17 the data path is /var/lib/postgresql/data; from 18 mount /var/lib/postgresql.
+      // The POSTGRES_* variables only matter when the volume is empty.
+      "Name": "postgres", "Group": "infra",
+      "Process": {
+        "Type": "docker", "Image": "pgvector/pgvector:pg17", "Container": "app-pg", "Port": 5433,
+        "Ports": [ "5433:5432" ], "Volumes": [ "app-pg-data:/var/lib/postgresql/data" ],
+        "Env": { "POSTGRES_USER": "app", "POSTGRES_DB": "app", "POSTGRES_PASSWORD": "dev" },
+        "ReadyExec": [ "pg_isready", "-U", "app" ]
+      }
+    },
+    {
+      // Tunnels to the gateway, not to the backend, so webhooks and a phone follow the backend's
+      // local/test/prod switch. /_gw stays unreachable through it.
+      "Name": "ngrok", "Group": "tunnel",
+      "Process": { "Type": "command", "Command": "ngrok", "Args": [ "http", "--url=app.ngrok.io", "8088" ], "DependsOn": [ "backend" ] }
+    },
+    {
+      "Name": "frontend", "Group": "frontend",
+      "Process": { "Type": "vite", "Dir": "web", "Port": 5173, "DependsOn": [ "backend" ] }
+    }
+  ]
+}

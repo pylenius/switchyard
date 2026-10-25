@@ -108,7 +108,14 @@ switchyard which                  # config, state folder, gateway URL and ports 
   `ASPNETCORE_ENVIRONMENT` set to match.
 - `DependsOn` waits for a routed dependency only while it is local (otherwise the backup environment
   serves it), and starts an unrouted one (a database) along with it.
-- A process that exits on its own is restarted up to three times.
+- A process that exits on its own is restarted up to three times, also when it exits before it is
+  ready.
+- On a fresh state (no state file yet) every routed service is local. One without a `LocalUrl` (a
+  tunnel, a frontend nobody routes to) stays off until you start it once (`switchyard start ngrok web`)
+  or a running service `DependsOn` it; the state file remembers it from then on.
+- Toggling a service off also stops its process, so its own port goes down along with the route.
+- `docker` containers run with `--rm`: keep data in a named volume (`"Volumes": [ "shop-db:/var/lib/postgresql" ]`).
+  Without one, the image's `VOLUME` gets an anonymous volume, and `--rm` deletes it on every stop.
 - Output is kept per process (the last 5000 lines) and written to `logs/{name}.log` in the state
   folder. Running processes' pids are in `pids.json` there, so a gateway that was killed stops its
   leftovers on the next start.
@@ -146,6 +153,58 @@ or `$SWITCHYARD_CONFIG`). Every key is documented in [`GatewayOptions.cs`](src/S
 
 Your own overrides go in `switchyard.user.json` next to the config (keep it out of git). Any
 key can also be given on the command line, e.g. `--Port=9000`.
+
+## Recipes
+
+[`examples/monolith.json`](examples/monolith.json) puts most of these together: one backend for
+every path, native redis, postgres in docker, a tunnel and a frontend.
+
+**One backend for every path.** `"PathPrefix": ""` routes everything to it rather than `/{name}/...`.
+
+**A program installed on the machine.** A `command` with a `Port` is ready once the port answers, so a
+service that `DependsOn` it waits for it:
+
+```json
+{ "Name": "redis", "Group": "infra",
+  "Process": { "Type": "command", "Command": "redis-server", "Args": [ "/opt/homebrew/etc/redis.conf" ], "Port": 6379 } }
+```
+
+**A tunnel for webhooks and phones.** Point it at the gateway, not at a service: what comes through
+it then follows the local/backup switch like everything else.
+
+```json
+{ "Name": "ngrok", "Group": "tunnel",
+  "Process": { "Type": "command", "Command": "ngrok", "Args": [ "http", "--url=myapp.ngrok.io", "8088" ], "DependsOn": [ "backend" ] } }
+```
+
+**Tests that must not reach a shared environment.** End-to-end tests that go through the gateway or
+the tunnel hit the backup environment while a service is toggled off, writes included. Check first:
+
+```bash
+curl -fsS localhost:8088/_gw/state | node -e '
+  const s = JSON.parse(require("fs").readFileSync(0));
+  process.exit(s.services.find((x) => x.name === "backend").local ? 0 : 1)' \
+  || { echo "backend is not local: toggle it on in switchyard"; exit 1; }
+```
+
+**Telling a coding agent.** A section like this in the repository's `CLAUDE.md` or `AGENTS.md`:
+
+```markdown
+## Dev environment
+switchyard runs the services (switchyard.json). Against a running gateway:
+- `switchyard status` first: what runs, where it is routed, the last build.
+- Build with `switchyard build backend` (errors as file:line:col, exit 1 on errors; restarts it), not
+  `dotnet build` or `dotnet run`: a second instance competes for the port, and a plain build leaves
+  the running one on the old code.
+- `switchyard logs backend -n 200`, `switchyard restart frontend`.
+- `switchyard which` says which config and ports this folder uses, even with no gateway running.
+```
+
+**Coming from process-compose (or a start script).** Each process becomes a service: an API you route
+to gets a `LocalUrl` (`dotnet` or `command`), the rest become unrouted `command`, `docker` or `vite`
+services, and `depends_on` becomes `DependsOn`. Keep the ports they had, so the apps' own config stays
+as it is. Before the first start, check where a database container keeps its data (`docker inspect`):
+if it is an anonymous volume, copy it into a named one first, or `--rm` deletes it.
 
 ## API
 
