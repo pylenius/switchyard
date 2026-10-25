@@ -12,7 +12,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>switchyard</ToolCommandName>
     <PackageId>Switchyard</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Authors>Pekka Ylenius</Authors>
     <Description>Run the services you work on locally and route the rest to dev, staging or prod: one local gateway that also builds, runs and restarts .NET, Vite and Docker processes, from any git worktree.</Description>
     <PackageTags>gateway;reverse-proxy;yarp;microservices;local-development;dotnet-tool</PackageTags>
