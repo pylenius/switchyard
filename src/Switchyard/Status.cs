@@ -12,7 +12,8 @@ public sealed record GatewaySnapshot(
     string Workspace = Workspaces.Main,
     IReadOnlyList<Workspace>? Workspaces = null,
     string Name = "",
-    IReadOnlyList<EnvironmentSnapshot>? EnvironmentDetails = null);
+    IReadOnlyList<EnvironmentSnapshot>? EnvironmentDetails = null,
+    ClaimSnapshot? Claim = null);
 
 public sealed record EnvironmentSnapshot(string Name, string Color, bool Warn);
 
@@ -46,7 +47,7 @@ public sealed record ProcessSnapshot(
 
 public sealed record BuildSummary(bool Success, DateTime FinishedAt, double Seconds, int Warnings, int Errors);
 
-public sealed class StatusBuilder(IOptions<GatewayOptions> options, GatewayState state, ProcessSupervisor supervisor, Workspaces workspaces)
+public sealed class StatusBuilder(IOptions<GatewayOptions> options, GatewayState state, ProcessSupervisor supervisor, Workspaces workspaces, Claims claims)
 {
     public GatewaySnapshot Snapshot() => new(
         options.Value.Port,
@@ -58,7 +59,8 @@ public sealed class StatusBuilder(IOptions<GatewayOptions> options, GatewayState
         state.DefaultWorkspace,
         workspaces.List(),
         options.Value.Name,
-        options.Value.Environments.Select(e => new EnvironmentSnapshot(e.Name, e.Color, e.Warn)).ToList());
+        options.Value.Environments.Select(e => new EnvironmentSnapshot(e.Name, e.Color, e.Warn)).ToList(),
+        claims.Current);
 
     ServiceSnapshot Service(ServiceOptions s) => new(
         s.Name,

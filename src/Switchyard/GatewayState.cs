@@ -161,6 +161,27 @@ public sealed class GatewayState
     }
 
     /// <summary>Health is display-only: a service toggled local stays local while it is down.</summary>
+    /// <summary>The default checkout and each service's own, to put back after a claim moved them all.</summary>
+    public sealed record CheckoutLayout(string Default, Dictionary<string, string> Own);
+
+    public CheckoutLayout Checkouts()
+    {
+        lock (_lock)
+            return new(_workspace, new Dictionary<string, string>(_workspaceOf, StringComparer.OrdinalIgnoreCase));
+    }
+
+    public void RestoreCheckouts(CheckoutLayout layout)
+    {
+        lock (_lock)
+        {
+            _workspace = layout.Default;
+            _workspaceOf.Clear();
+            foreach (var (service, workspace) in layout.Own)
+                _workspaceOf[service] = workspace;
+        }
+        OnChanged($"checkouts back: default {layout.Default}");
+    }
+
     public void SetLocalUp(string name, bool up) => _localUp[name] = up;
 
     public ServiceOptions? FindService(string name) =>

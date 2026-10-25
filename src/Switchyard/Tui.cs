@@ -511,6 +511,10 @@ public sealed class Tui
         line($"  {Bold}{Title}{Reset}  {Cyan}http://localhost:{s.Port}{Reset}   as {Bold}{s.AspNetEnvironment}{Reset}" +
              $"   checkout {Magenta}{s.Workspace}{Reset}   backup {envs}" +
              (s.Supervising ? "" : $"   {Yellow}--no-processes{Reset}"));
+        // Your keys still work while it is held (the text UI overrides claims), but they cut into that test.
+        if (s.Claim is { } claim)
+            line($"  {Yellow}claimed by {Bold}{claim.Holder}{Reset}{Yellow} since {claim.Since.ToLocalTime():HH:mm}, until {claim.Until.ToLocalTime():HH:mm}" +
+                 (claim.Workspace != null ? $", checkout {claim.Workspace}" : "") + $" (a test is running; your changes cut into it){Reset}");
         line("");
     }
 

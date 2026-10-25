@@ -52,13 +52,13 @@ if (options.Command == "which")
 
 if (options.Command != null)
 {
-    Environment.ExitCode = await Cli.Run(options.Command, options.CommandArgs, new GatewayClient(adminUrl));
+    Environment.ExitCode = await Cli.Run(options.Command, options.CommandArgs, new GatewayClient(adminUrl).As(options.As, options.Force));
     return;
 }
 
 if (!options.Headless && await GatewayClient.IsRunning(adminUrl))
 {
-    await Tui.Run(new GatewayClient(adminUrl), ownsGateway: false, CancellationToken.None);
+    await Tui.Run(new GatewayClient(adminUrl).As("text UI", force: true), ownsGateway: false, CancellationToken.None);
     return;
 }
 
@@ -108,6 +108,7 @@ builder.Services.AddSingleton<GatewayState>();
 builder.Services.AddSingleton<Workspaces>();
 builder.Services.AddSingleton<ProcessSupervisor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ProcessSupervisor>());
+builder.Services.AddSingleton<Claims>();
 builder.Services.AddSingleton<StatusBuilder>();
 builder.Services.AddHostedService<LocalHealthProbe>();
 builder.Services.AddReverseProxy().LoadFromMemory([], []);
@@ -161,7 +162,39 @@ app.UseRouting();
 // The admin API answers only to a localhost Host: tunneled requests also reach this port, and must
 // not be able to switch a developer's routing (to prod, say) or run commands from the internet.
 var admin = app.MapGroup("/_gw").RequireHost($"localhost:{gateway.Port}", $"127.0.0.1:{gateway.Port}");
+var claims = app.Services.GetRequiredService<Claims>();
+
+// While someone holds the claim, only they change anything (reads stay open); the claim itself has its own rules.
+// Callers name themselves with X-Switchyard-As; X-Switchyard-Force overrides (the text UI, a person at the keyboard).
+admin.AddEndpointFilter(async (context, next) =>
+{
+    var request = context.HttpContext.Request;
+    if (HttpMethods.IsGet(request.Method) || request.Path.StartsWithSegments("/_gw/claim"))
+        return await next(context);
+    var caller = request.Headers[GatewayClient.AsHeader].FirstOrDefault();
+    if (request.Headers.ContainsKey(GatewayClient.ForceHeader) || claims.Allows(caller))
+        return await next(context);
+    return Results.Conflict(claims.Current is { } held ? ClaimedMessage(held) : "Claimed.");
+});
+
 admin.MapGet("/state", (StatusBuilder status) => status.Snapshot());
+admin.MapGet("/claim", () => claims.Current is { } held ? Results.Ok(held) : Results.NoContent());
+admin.MapPut("/claim", (ClaimRequest request, StatusBuilder status) =>
+{
+    if (string.IsNullOrWhiteSpace(request.As))
+        return Results.BadRequest("Name yourself: --as <name>, or set SWITCHYARD_AS.");
+    var found = request.Workspace == null ? null : workspaces.Find(request.Workspace);
+    if (request.Workspace != null && found == null)
+        return Results.NotFound($"No checkout '{request.Workspace}'.");
+    var minutes = Math.Clamp(request.Minutes ?? 30, 1, 24 * 60);
+    return claims.Take(request.As.Trim(), TimeSpan.FromMinutes(minutes), found?.Name) is { } held
+        ? Results.Conflict(ClaimedMessage(held))
+        : Results.Ok(status.Snapshot());
+});
+admin.MapDelete("/claim", (string? @as, bool? force, StatusBuilder status) =>
+    claims.Release(@as, force ?? false) is { } held
+        ? Results.Conflict(ClaimedMessage(held, "Only they release it, or pass --force."))
+        : Results.Ok(status.Snapshot()));
 admin.MapPut("/backup", (BackupRequest request, StatusBuilder status) =>
     state.SetBackup(request.Env) ? Results.Ok(status.Snapshot()) : Results.NotFound($"Unknown environment '{request.Env}'."));
 admin.MapPut("/services", (LocalRequest request, StatusBuilder status) =>
@@ -248,7 +281,7 @@ if (options.Headless)
 }
 
 await app.StartAsync();
-await Tui.Run(new GatewayClient(adminUrl), ownsGateway: true, lifetime.ApplicationStopping);
+await Tui.Run(new GatewayClient(adminUrl).As("text UI", force: true), ownsGateway: true, lifetime.ApplicationStopping);
 try
 {
     Console.WriteLine("Stopping switchyard and its processes...");
@@ -257,6 +290,10 @@ catch (IOException)
 {
 }
 await app.StopAsync();
+
+static string ClaimedMessage(ClaimSnapshot held, string hint = "Wait for it: switchyard claim --as <you> --wait. Override: --force.") =>
+    $"Claimed by {held.Holder} since {held.Since.ToLocalTime():HH:mm}, until {held.Until.ToLocalTime():HH:mm}" +
+    (held.Workspace != null ? $", running checkout {held.Workspace}" : "") + $". {hint}";
 
 // A connect, not a test bind: a listener on the IPv6 wildcard leaves 127.0.0.1 bindable on macOS.
 static async Task<bool> PortInUse(int port)
@@ -281,11 +318,12 @@ static async Task<bool> PortInUse(int port)
 record BackupRequest(string Env);
 record LocalRequest(bool Local);
 record WorkspaceRequest(string? Workspace);
+record ClaimRequest(string? As, int? Minutes, string? Workspace);
 
 /// <summary>The gateway's own flags, taken out before the rest reaches ASP.NET configuration.</summary>
 sealed record Flags(
     bool Headless, bool Processes, string? AspNetEnvironment, string? Workspace, string? Config,
-    string? Command, string[] CommandArgs, string[] Rest, bool Help = false)
+    string? Command, string[] CommandArgs, string[] Rest, bool Help = false, string? As = null, bool Force = false)
 {
     public const string Usage = """
         switchyard                          text UI; attaches to a running gateway, or starts one in-process
@@ -305,6 +343,9 @@ sealed record Flags(
           setup <name>                      reinstall dependencies (vite: rm -rf node_modules, npm ci)
           workspace [<checkout> [name...]]  list the checkouts, or set the default one
           which                             the config, state folder and ports this folder uses (no gateway needed)
+          claim [--for 30m] [--wait] [--no-switch]   hold the gateway for a test; dotnet and vite services run from this folder's checkout
+          release                           give it back; the checkouts go back as they were
+        Name yourself for claims with --as <name> or $SWITCHYARD_AS; --force overrides someone else's claim.
         """;
 
     public static Flags Parse(string[] args)
@@ -313,6 +354,8 @@ sealed record Flags(
         var processes = true;
         var env = Environment.GetEnvironmentVariable("SWITCHYARD_ENV") is { Length: > 0 } fromEnv ? fromEnv : null;
         string? workspace = null, config = null, command = null;
+        var caller = Environment.GetEnvironmentVariable("SWITCHYARD_AS") is { Length: > 0 } fromEnvAs ? fromEnvAs : null;
+        var force = false;
         var commandArgs = new List<string>();
         var rest = new List<string>();
         for (var i = 0; i < args.Length; i++)
@@ -322,6 +365,10 @@ sealed record Flags(
                 // Commands take their own arguments; --config and settings (--Port=9000) are the gateway's.
                 if (args[i] == "--config" && i + 1 < args.Length)
                     config = args[++i];
+                else if (args[i] == "--as" && i + 1 < args.Length)
+                    caller = args[++i];
+                else if (args[i] == "--force")
+                    force = true;
                 else if (args[i].StartsWith("--") && args[i].Contains('='))
                     rest.Add(args[i]);
                 else
@@ -337,10 +384,12 @@ sealed record Flags(
                 case "--env" when i + 1 < args.Length: env = args[++i]; break;
                 case "--workspace" when i + 1 < args.Length: workspace = args[++i]; break;
                 case "--config" when i + 1 < args.Length: config = args[++i]; break;
+                case "--as" when i + 1 < args.Length: caller = args[++i]; break;
+                case "--force": force = true; break;
                 case var verb when rest.Count == 0 && Cli.Commands.Contains(verb): command = verb; headless = true; break;
                 default: rest.Add(args[i]); break;
             }
         }
-        return new Flags(headless, processes, env, workspace, config, command, [.. commandArgs], [.. rest]);
+        return new Flags(headless, processes, env, workspace, config, command, [.. commandArgs], [.. rest], As: caller, Force: force);
     }
 }

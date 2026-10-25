@@ -11,7 +11,27 @@ public sealed class GatewayClient(string adminUrl)
 
     readonly HttpClient _http = new() { BaseAddress = new Uri(adminUrl), Timeout = TimeSpan.FromSeconds(5) };
 
+    public const string AsHeader = "X-Switchyard-As";
+    public const string ForceHeader = "X-Switchyard-Force";
+
     public string AdminUrl => adminUrl;
+
+    /// <summary>Who is asking (the claim's holder is let through), and whether to override someone else's claim.</summary>
+    public string? Caller { get; private set; }
+    public bool Force { get; private set; }
+
+    public GatewayClient As(string? caller, bool force = false)
+    {
+        Caller = string.IsNullOrWhiteSpace(caller) ? null : caller;
+        Force = force;
+        _http.DefaultRequestHeaders.Remove(AsHeader);
+        _http.DefaultRequestHeaders.Remove(ForceHeader);
+        if (!string.IsNullOrWhiteSpace(caller))
+            _http.DefaultRequestHeaders.Add(AsHeader, caller);
+        if (force)
+            _http.DefaultRequestHeaders.Add(ForceHeader, "1");
+        return this;
+    }
 
     public static async Task<bool> IsRunning(string adminUrl)
     {
@@ -42,6 +62,16 @@ public sealed class GatewayClient(string adminUrl)
     /// <summary>One service's checkout (null: follow the default), or with no service the default for all.</summary>
     public Task<GatewaySnapshot?> SetWorkspace(string? service, string? workspace) =>
         Put(service == null ? "workspace" : $"services/{service}/workspace", new { workspace });
+
+    public Task<GatewaySnapshot?> Claim(string caller, int minutes, string? workspace) =>
+        Put("claim", new { @as = caller, minutes, workspace });
+
+    public async Task<GatewaySnapshot?> Release(string? caller, bool force)
+    {
+        using var response = await _http.DeleteAsync($"claim?as={Uri.EscapeDataString(caller ?? "")}&force={force.ToString().ToLowerInvariant()}");
+        await EnsureSuccess(response);
+        return await response.Content.ReadFromJsonAsync<GatewaySnapshot>(Json);
+    }
 
     public async Task<ProcessSnapshot?> Command(string process, string action, bool? restart = null)
     {
@@ -77,8 +107,12 @@ public sealed class GatewayClient(string adminUrl)
         if (response.IsSuccessStatusCode)
             return;
         var body = (await response.Content.ReadAsStringAsync()).Trim().Trim('"');
-        throw new GatewayException(body.Length > 0 ? body : $"{(int)response.StatusCode} {response.ReasonPhrase}");
+        throw new GatewayException(body.Length > 0 ? body : $"{(int)response.StatusCode} {response.ReasonPhrase}", response.StatusCode);
     }
 }
 
-public sealed class GatewayException(string message) : Exception(message);
+public sealed class GatewayException(string message, HttpStatusCode? status = null) : Exception(message)
+{
+    /// <summary>409: someone else holds the claim.</summary>
+    public bool Claimed => status == HttpStatusCode.Conflict;
+}

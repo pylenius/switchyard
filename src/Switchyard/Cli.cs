@@ -13,10 +13,13 @@ namespace Switchyard;
 ///   run workspace                     list the checkouts
 ///   run workspace <checkout> [name...]  default checkout for all, or for the named services ("default" follows the default)
 ///   run which                         the config, state folder and ports this folder uses; needs no running gateway
+///   run claim [--for 30m] [--wait] [--no-switch]  hold the gateway for a test, from this folder's checkout (see Claims)
+///   run release                       give it back
+///   --as <name> (or $SWITCHYARD_AS) names the caller; --force overrides someone else's claim
 /// </summary>
 public static class Cli
 {
-    public static readonly HashSet<string> Commands = ["status", "start", "stop", "restart", "build", "errors", "logs", "setup", "workspace", "which"];
+    public static readonly HashSet<string> Commands = ["status", "start", "stop", "restart", "build", "errors", "logs", "setup", "workspace", "which", "claim", "release"];
 
     /// <summary>Which gateway this folder belongs to: with several projects each on its own port, the one the commands here talk to.</summary>
     public static async Task<int> Which(string configPath, GatewayOptions gateway, GatewayClient client)
@@ -57,6 +60,8 @@ public static class Cli
                 "errors" => await Errors(client, args),
                 "logs" => await Logs(client, args),
                 "workspace" => await Workspace(client, args),
+                "claim" => await Claim(client, args),
+                "release" => await Release(client),
                 _ => 2,
             };
         }
@@ -72,6 +77,10 @@ public static class Cli
         var state = await client.GetState() ?? throw new GatewayException("No state.");
         Console.WriteLine($"backup {state.Backup}   environment {state.AspNetEnvironment}   default checkout {state.Workspace}" +
             (state.Supervising ? "" : "   (--no-processes: starts nothing)"));
+        Console.WriteLine(state.Claim is { } claim
+            ? $"claimed by {claim.Holder} since {claim.Since.ToLocalTime():HH:mm}, until {claim.Until.ToLocalTime():HH:mm}" +
+              (claim.Workspace != null ? $", checkout {claim.Workspace}" : "")
+            : "not claimed");
         Console.WriteLine($"{"NAME",-11} {"GOES TO",-8} {"STATE",-12} {"BUILD",-14} {"CHECKOUT",-28} DETAIL");
         foreach (var s in state.Services)
         {
@@ -82,6 +91,94 @@ public static class Cli
         }
         return 0;
     }
+
+    /// <summary>
+    /// Takes the gateway for a test (or renews it): with --wait behind whoever holds it. From a worktree every
+    /// service then runs from it; this waits until they do, so what is tested is this checkout's code.
+    /// </summary>
+    static async Task<int> Claim(GatewayClient client, string[] args)
+    {
+        var caller = client.Caller ?? throw new GatewayException("Name yourself: switchyard claim --as <name> (or set SWITCHYARD_AS), so others can see who holds it.");
+        var minutes = 30;
+        if (Array.IndexOf(args, "--for") is var at and >= 0)
+            minutes = at + 1 < args.Length ? ParseMinutes(args[at + 1]) : throw new GatewayException("--for takes a duration: 30m, 2h, 45.");
+        var wait = args.Contains("--wait");
+
+        var state = await client.GetState() ?? throw new GatewayException("No state.");
+        var checkout = args.Contains("--no-switch") ? null : CheckoutOf(Directory.GetCurrentDirectory(), state);
+
+        var waitUntil = DateTime.UtcNow.AddHours(2);
+        var said = false;
+        while (true)
+        {
+            try
+            {
+                state = await client.Claim(caller, minutes, checkout?.Name) ?? throw new GatewayException("No state.");
+                break;
+            }
+            catch (GatewayException ex) when (ex.Claimed && wait && DateTime.UtcNow < waitUntil)
+            {
+                if (!said)
+                    Console.WriteLine($"{ex.Message.Split(". Wait")[0]}; waiting.");
+                said = true;
+                await Task.Delay(TimeSpan.FromSeconds(5));
+            }
+        }
+
+        var held = state.Claim!;
+        Console.WriteLine($"claimed by {held.Holder} until {held.Until.ToLocalTime():HH:mm}" +
+            (checkout != null ? $"; dotnet and vite services run from checkout {checkout.Name}" : ""));
+        return checkout == null ? 0 : await WaitForCheckout(client, checkout.Name);
+    }
+
+    static async Task<int> Release(GatewayClient client)
+    {
+        var state = await client.Release(client.Caller, client.Force) ?? throw new GatewayException("No state.");
+        Console.WriteLine($"released; default checkout {state.Workspace}");
+        return 0;
+    }
+
+    /// <summary>Until every local service runs (or failed to) from the checkout: a switch rebuilds and restarts them.</summary>
+    static async Task<int> WaitForCheckout(GatewayClient client, string checkout)
+    {
+        var deadline = DateTime.UtcNow.AddMinutes(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            var state = await client.GetState() ?? throw new GatewayException("No state.");
+            var local = state.Services.Where(s => s.Local && s.Process != null && s.Workspace.Equals(checkout, StringComparison.OrdinalIgnoreCase)).ToList();
+            var failed = local.Where(s => s.Process!.State is ProcessState.BuildFailed or ProcessState.Crashed && !s.Process.Busy).ToList();
+            if (failed.Count > 0)
+            {
+                foreach (var s in failed)
+                    Console.Error.WriteLine($"{s.Name}: {s.Process!.State} in {checkout}: {s.Process.Detail}");
+                return 1;
+            }
+            if (local.All(s => s.Process!.State is ProcessState.Running or ProcessState.External && !s.Process.Busy
+                               && (s.Process.RunningIn == null || s.Process.RunningIn.Equals(checkout, StringComparison.OrdinalIgnoreCase))))
+            {
+                if (local.Count > 0)
+                    Console.WriteLine($"running from {checkout}: {string.Join(", ", local.Select(s => s.Name))}");
+                return 0;
+            }
+            await Task.Delay(1000);
+        }
+        Console.Error.WriteLine($"not all services run from {checkout} after 10 min; see switchyard status");
+        return 1;
+    }
+
+    /// <summary>The checkout a folder is in: the deepest one containing it (a worktree may sit inside the main checkout).</summary>
+    static Workspace? CheckoutOf(string folder, GatewaySnapshot state)
+    {
+        var full = Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return (state.Workspaces ?? [])
+            .Where(w => full.StartsWith(Path.GetFullPath(w.Path).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            .MaxBy(w => w.Path.Length);
+    }
+
+    static int ParseMinutes(string text) =>
+        text.EndsWith('h') && double.TryParse(text[..^1], System.Globalization.CultureInfo.InvariantCulture, out var hours) ? (int)Math.Ceiling(hours * 60)
+        : double.TryParse(text.TrimEnd('m'), System.Globalization.CultureInfo.InvariantCulture, out var minutes) ? (int)Math.Ceiling(minutes)
+        : throw new GatewayException($"Not a duration: {text} (30m, 2h, 45).");
 
     static async Task<int> Simple(GatewayClient client, string command, string[] names)
     {

@@ -93,6 +93,8 @@ switchyard setup web              # rm -rf node_modules && npm ci
 switchyard workspace                      # list the checkouts
 switchyard workspace my-feature orders    # orders from that worktree ("default" follows the default)
 switchyard which                  # config, state folder, gateway URL and ports for this folder; no gateway needed
+switchyard claim --as feat-b --wait   # hold the gateway for a test (see Several agents)
+switchyard release --as feat-b
 ```
 
 ## Processes
@@ -177,6 +179,33 @@ or `$SWITCHYARD_CONFIG`). Every key is documented in [`GatewayOptions.cs`](src/S
 
 Your own overrides go in `switchyard.user.json` next to the config (keep it out of git). Any
 key can also be given on the command line, e.g. `--Port=9000`.
+
+## Several agents
+
+Agents working on features in their own worktrees share one gateway: one set of ports, one routing, one
+running copy of each service. So keep apart what can run side by side from what cannot:
+
+- **Compile and unit-test in your own worktree** with the usual tools (`dotnet build`, `dotnet test`,
+  `npm run test:unit`). Each worktree has its own `bin/` and `obj/`, so agents can build at the same
+  time. `switchyard build` is not for this: it builds the checkout the service runs from, which may be
+  another agent's.
+- **Claim the gateway for anything that runs against it** (end-to-end tests, a browser, a phone):
+
+```bash
+cd ../shop-feat-b
+switchyard claim --as feat-b --for 30m --wait   # waits behind whoever holds it
+# the dotnet and vite services now build and run from this worktree; claim returns once they do
+npm run test:e2e
+switchyard release --as feat-b                  # the checkouts go back as they were
+```
+
+While a claim is held, anyone else's `start`, `stop`, `restart`, `build`, `workspace` and routing changes
+are refused with who holds it and until when (`switchyard status` shows it too); reads (`status`, `logs`,
+`errors`) stay open. The holder's own changes renew it; claim again to renew it during a long test.
+A claim that is not renewed lapses after its time (default 30 min), so an agent that crashed cannot block
+the gateway. `--force` overrides it, and the text UI always does: it is you at the keyboard, and its
+header shows the claim so you know you would cut into a test. Set `SWITCHYARD_AS` instead of passing
+`--as` every time. `--no-switch` claims without moving any service.
 
 ## Recipes
 
