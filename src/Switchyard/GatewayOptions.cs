@@ -32,6 +32,9 @@ public sealed class GatewayOptions
     /// <summary>How many builds run at once.</summary>
     public int ParallelBuilds { get; set; } = 4;
 
+    /// <summary>A claim whose holder sends nothing for this long lapses, whatever its --for.</summary>
+    public double ClaimIdleMinutes { get; set; } = 10;
+
     public List<EnvironmentOptions> Environments { get; set; } = [];
     public List<ServiceOptions> Services { get; set; } = [];
 

@@ -96,8 +96,11 @@ public static class Cli
     /// Takes the gateway for a test (or renews it): with --wait behind whoever holds it. From a worktree every
     /// service then runs from it; this waits until they do, so what is tested is this checkout's code.
     /// </summary>
-    static async Task<int> Claim(GatewayClient client, string[] args)
+    static async Task<int> Claim(GatewayClient client, string[] all)
     {
+        var dashes = Array.IndexOf(all, "--");
+        var args = dashes < 0 ? all : all[..dashes];
+        var run = dashes < 0 ? [] : all[(dashes + 1)..];
         var caller = client.Caller ?? throw new GatewayException("Name yourself: switchyard claim --as <name> (or set SWITCHYARD_AS), so others can see who holds it.");
         var minutes = 30;
         if (Array.IndexOf(args, "--for") is var at and >= 0)
@@ -128,7 +131,66 @@ public static class Cli
         var held = state.Claim!;
         Console.WriteLine($"claimed by {held.Holder} until {held.Until.ToLocalTime():HH:mm}" +
             (checkout != null ? $"; dotnet and vite services run from checkout {checkout.Name}" : ""));
-        return checkout == null ? 0 : await WaitForCheckout(client, checkout.Name);
+        var ready = checkout == null ? 0 : await WaitForCheckout(client, checkout.Name);
+        if (run.Length == 0)
+            return ready;
+        try
+        {
+            return ready != 0 ? ready : await RunHolding(client, caller, minutes, checkout?.Name, run);
+        }
+        finally
+        {
+            // Also when the command failed, or the services never came up: the next agent is waiting.
+            await client.Release(caller, force: false);
+            Console.WriteLine("released");
+        }
+    }
+
+    /// <summary>
+    /// Runs the command in the foreground (same terminal, same exit code) and renews the claim while it runs.
+    /// Ctrl-C and SIGTERM reach the command; the claim is released once it has exited.
+    /// </summary>
+    static async Task<int> RunHolding(GatewayClient client, string caller, int minutes, string? checkout, string[] run)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo(run[0]) { UseShellExecute = false };
+        foreach (var arg in run[1..])
+            info.ArgumentList.Add(arg);
+        using var child = System.Diagnostics.Process.Start(info) ?? throw new GatewayException($"could not start {run[0]}");
+
+        // The terminal sends Ctrl-C to the whole process group, the command included: only wait for it here.
+        ConsoleCancelEventHandler onCancel = (_, e) => e.Cancel = true;
+        Console.CancelKeyPress += onCancel;
+        using var term = OperatingSystem.IsWindows() ? null : System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGTERM, context =>
+        {
+            context.Cancel = true;
+            try { child.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+        });
+
+        using var renew = new CancellationTokenSource();
+        var renewing = Task.Run(async () =>
+        {
+            while (!renew.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(20), renew.Token);
+                    await client.Claim(caller, minutes, checkout);
+                }
+                catch (OperationCanceledException) { }
+                catch (GatewayException ex) { Console.Error.WriteLine($"renewing the claim: {ex.Message}"); }
+            }
+        });
+        try
+        {
+            await child.WaitForExitAsync();
+            return child.ExitCode;
+        }
+        finally
+        {
+            renew.Cancel();
+            await renewing;
+            Console.CancelKeyPress -= onCancel;
+        }
     }
 
     static async Task<int> Release(GatewayClient client)

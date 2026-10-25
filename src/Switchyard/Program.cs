@@ -169,9 +169,14 @@ var claims = app.Services.GetRequiredService<Claims>();
 admin.AddEndpointFilter(async (context, next) =>
 {
     var request = context.HttpContext.Request;
-    if (HttpMethods.IsGet(request.Method) || request.Path.StartsWithSegments("/_gw/claim"))
-        return await next(context);
     var caller = request.Headers[GatewayClient.AsHeader].FirstOrDefault();
+    if (HttpMethods.IsGet(request.Method))
+    {
+        claims.Touch(caller);
+        return await next(context);
+    }
+    if (request.Path.StartsWithSegments("/_gw/claim"))
+        return await next(context);
     if (request.Headers.ContainsKey(GatewayClient.ForceHeader) || claims.Allows(caller))
         return await next(context);
     return Results.Conflict(claims.Current is { } held ? ClaimedMessage(held) : "Claimed.");
@@ -343,7 +348,9 @@ sealed record Flags(
           setup <name>                      reinstall dependencies (vite: rm -rf node_modules, npm ci)
           workspace [<checkout> [name...]]  list the checkouts, or set the default one
           which                             the config, state folder and ports this folder uses (no gateway needed)
-          claim [--for 30m] [--wait] [--no-switch]   hold the gateway for a test; dotnet and vite services run from this folder's checkout
+          claim [--for 30m] [--wait] [--no-switch] [-- command...]
+                                            hold the gateway for a test; dotnet and vite services run from this folder's checkout.
+                                            With a command: run it, then release (also when it fails); exit with its code
           release                           give it back; the checkouts go back as they were
         Name yourself for claims with --as <name> or $SWITCHYARD_AS; --force overrides someone else's claim.
         """;
@@ -362,6 +369,12 @@ sealed record Flags(
         {
             if (command != null)
             {
+                // After "--" everything belongs to the command claim runs, verbatim.
+                if (args[i] == "--")
+                {
+                    commandArgs.AddRange(args[i..]);
+                    break;
+                }
                 // Commands take their own arguments; --config and settings (--Port=9000) are the gateway's.
                 if (args[i] == "--config" && i + 1 < args.Length)
                     config = args[++i];

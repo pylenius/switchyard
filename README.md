@@ -93,7 +93,8 @@ switchyard setup web              # rm -rf node_modules && npm ci
 switchyard workspace                      # list the checkouts
 switchyard workspace my-feature orders    # orders from that worktree ("default" follows the default)
 switchyard which                  # config, state folder, gateway URL and ports for this folder; no gateway needed
-switchyard claim --as feat-b --wait   # hold the gateway for a test (see Several agents)
+switchyard claim --as feat-b --wait -- npm run test:e2e   # hold the gateway for one command (see Several agents)
+switchyard claim --as feat-b --wait   # ...or until you release it
 switchyard release --as feat-b
 ```
 
@@ -164,6 +165,7 @@ or `$SWITCHYARD_CONFIG`). Every key is documented in [`GatewayOptions.cs`](src/S
 | `Port` | `8088` | the gateway's port |
 | `RoutePrefix` | `/{name}` | path a service is routed on; a service's `PathPrefix` overrides it |
 | `RunAs` | `Development` | ASP.NET environment for `dotnet` services |
+| `ClaimIdleMinutes` | `10` | a claim whose holder sends nothing for this long lapses |
 | `StateFile` | `~/.config/switchyard/{Name}/state.json` | routing, backup environment and checkouts, kept across restarts |
 | `ProcessEnv` | | environment variables for every process |
 | `Environments` | | `Name`, `Upstreams` (`{ "api": "https://..." }`), `Color`, `Warn` |
@@ -189,23 +191,32 @@ running copy of each service. So keep apart what can run side by side from what 
   `npm run test:unit`). Each worktree has its own `bin/` and `obj/`, so agents can build at the same
   time. `switchyard build` is not for this: it builds the checkout the service runs from, which may be
   another agent's.
-- **Claim the gateway for anything that runs against it** (end-to-end tests, a browser, a phone):
+- **Claim the gateway for anything that runs against it** (end-to-end tests, a browser, a phone).
+  Give it the command, so the claim cannot outlive it:
 
 ```bash
 cd ../shop-feat-b
-switchyard claim --as feat-b --for 30m --wait   # waits behind whoever holds it
-# the dotnet and vite services now build and run from this worktree; claim returns once they do
-npm run test:e2e
-switchyard release --as feat-b                  # the checkouts go back as they were
+switchyard claim --as feat-b --wait -- npm run test:e2e
 ```
+
+  That waits behind whoever holds the gateway, moves the dotnet and vite services to this worktree,
+  waits until they run from it, runs the command in the foreground (renewing the claim meanwhile),
+  and releases when it exits: also when it fails, on Ctrl-C or on SIGTERM. Its exit code is the
+  command's. Several steps: `-- sh -c 'curl -fsS localhost:8088/health && npm run test:e2e'`.
+
+  Without a command, the claim is held until `switchyard release --as feat-b`: for poking at it in a
+  browser. Run that `claim --wait` in the foreground, not through a pipe (`| tail` shows nothing until
+  it ends), so you know when you hold it.
 
 While a claim is held, anyone else's `start`, `stop`, `restart`, `build`, `workspace` and routing changes
 are refused with who holds it and until when (`switchyard status` shows it too); reads (`status`, `logs`,
-`errors`) stay open. The holder's own changes renew it; claim again to renew it during a long test.
-A claim that is not renewed lapses after its time (default 30 min), so an agent that crashed cannot block
-the gateway. `--force` overrides it, and the text UI always does: it is you at the keyboard, and its
-header shows the claim so you know you would cut into a test. Set `SWITCHYARD_AS` instead of passing
-`--as` every time. `--no-switch` claims without moving any service.
+`errors`) stay open and need no name. Every command the holder sends, reads included, keeps it alive. A
+claim lapses at the end of `--for` (default 30 min), or sooner when its holder sends nothing for
+`ClaimIdleMinutes` (default 10), so an agent that crashed or went quiet cannot block the others. `--force`
+overrides it, and the text UI always does: it is you at the keyboard, and its header shows the claim so
+you know you would cut into a test. Set `SWITCHYARD_AS` instead of passing `--as` every time.
+`--no-switch` claims without moving any service. Right after a release the services show Stopped for a
+moment while the next holder's checkout builds.
 
 ## Recipes
 
