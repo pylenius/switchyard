@@ -389,7 +389,10 @@ public sealed class ProcessSupervisor : BackgroundService
         }
         WindowsJob.Release(process.Id);
         if (mp.Process != process)
+        {
+            process.Dispose();
             return;
+        }
 
         var code = process.ExitCode;
         (mp.Process, mp.ExitedAt, mp.ExitCode) = (null, DateTime.Now, code);
@@ -468,6 +471,13 @@ public sealed class ProcessSupervisor : BackgroundService
         await mp.Type.Stop(Context(mp, mp.RunningIn!), process);
         for (var i = 0; i < 20 && mp.Process == process; i++)
             await Task.Delay(100);
+        if (mp.Process == process)
+        {
+            // Watch has not seen the exit yet (it also waits for the output to close). Detach it now: the next
+            // start resets StopRequested, and Watch would then take this stop for a crash of the new run.
+            mp.Process = null;
+            ForgetPid(mp);
+        }
         (mp.State, mp.Detail) = (ProcessState.Stopped, null);
     }
 
