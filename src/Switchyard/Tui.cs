@@ -55,6 +55,7 @@ public sealed class Tui
         var lastFrame = "";
         var nextPoll = DateTime.MinValue;
 
+        WindowsConsole.EnableAnsi();
         Console.TreatControlCAsInput = true;
         Console.Write("\e[?1049h\e[?25l"); // alternate screen, hide cursor
         try
