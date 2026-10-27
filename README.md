@@ -346,6 +346,10 @@ but not `/_gw`.
   with errors therefore leaves it down until the next successful build (elsewhere the old build keeps
   serving).
 - `npm`, `npx` and other `.cmd` tools are started through `cmd.exe`.
+- The text UI turns on virtual terminal processing for its console, so its colours and cursor codes also
+  work in a plain console (cmd.exe), not only in Windows Terminal. Git Bash's own window (mintty) gives
+  programs pipes rather than a console, so there switchyard starts headless: run it as
+  `winpty dotnet switchyard`, or open Git Bash in Windows Terminal.
 
 ## Building
 
